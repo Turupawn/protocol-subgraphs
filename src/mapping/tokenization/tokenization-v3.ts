@@ -190,73 +190,39 @@ function tokenMint(
   index: BigInt
 ): void {
   let aToken = getOrInitSubToken(event.address);
+  let userReserve = getOrInitUserReserve(onBehalf, aToken.underlyingAssetAddress, event);
   let poolReserve = getOrInitReserve(aToken.underlyingAssetAddress, event);
+
   const userBalanceChange = value.minus(balanceIncrease);
+  let calculatedAmount = rayDiv(userBalanceChange, index);
 
+  userReserve.scaledATokenBalance = userReserve.scaledATokenBalance.plus(calculatedAmount);
+  userReserve.currentATokenBalance = rayMul(userReserve.scaledATokenBalance, index);
+  userReserve.variableBorrowIndex = poolReserve.variableBorrowIndex;
+  userReserve.liquidityRate = poolReserve.liquidityRate;
+
+  // TODO: review liquidity?
+  poolReserve.totalSupplies = poolReserve.totalSupplies.plus(userBalanceChange);
+  // poolReserve.availableLiquidity = poolReserve.totalDeposits
+  //   .minus(poolReserve.totalPrincipalStableDebt)
+  //   .minus(poolReserve.totalScaledVariableDebt);
+
+  poolReserve.availableLiquidity = poolReserve.availableLiquidity.plus(userBalanceChange);
   poolReserve.totalATokenSupply = poolReserve.totalATokenSupply.plus(userBalanceChange);
-  let poolId = getPoolByContract(event);
-  let pool = PoolSchema.load(poolId);
-  if (pool && pool.pool) {
-    let poolContract = Pool.bind(Address.fromString((pool.pool as Bytes).toHexString()));
-    const reserveData = poolContract.try_getReserveData(
-      Address.fromString(aToken.underlyingAssetAddress.toHexString())
-    );
-    if (!reserveData.reverted) {
-      poolReserve.accruedToTreasury = reserveData.value.accruedToTreasury;
-    } else {
-      log.error('error reading reserveData. Pool: {}, Underlying: {}', [
-        (pool.pool as Bytes).toHexString(),
-        aToken.underlyingAssetAddress.toHexString(),
-      ]);
-    }
-  }
 
-  // Check if we are minting to treasury for mainnet and polygon
-  if (
-    onBehalf.toHexString() != '0xB2289E329D2F85F1eD31Adbb30eA345278F21bcf'.toLowerCase() &&
-    onBehalf.toHexString() != '0xe8599F3cc5D38a9aD6F3684cd5CEa72f10Dbc383'.toLowerCase() &&
-    onBehalf.toHexString() != '0xBe85413851D195fC6341619cD68BfDc26a25b928'.toLowerCase() &&
-    onBehalf.toHexString() != '0x5ba7fd868c40c16f7aDfAe6CF87121E13FC2F7a0'.toLowerCase() &&
-    onBehalf.toHexString() != '0x8A020d92D6B119978582BE4d3EdFdC9F7b28BF31'.toLowerCase() &&
-    onBehalf.toHexString() != '0x053D55f9B5AF8694c503EB288a1B7E552f590710'.toLowerCase() &&
-    onBehalf.toHexString() != '0x464C71f6c2F760DdA6093dCB91C24c39e5d6e18c'.toLowerCase() 
-  ) {
-    let userReserve = getOrInitUserReserve(onBehalf, aToken.underlyingAssetAddress, event);
-    let calculatedAmount = rayDiv(userBalanceChange, index);
+  poolReserve.totalLiquidity = poolReserve.totalLiquidity.plus(userBalanceChange);
+  poolReserve.lifetimeWithdrawals = poolReserve.lifetimeWithdrawals.minus(userBalanceChange);
 
-    userReserve.scaledATokenBalance = userReserve.scaledATokenBalance.plus(calculatedAmount);
-    userReserve.currentATokenBalance = rayMul(userReserve.scaledATokenBalance, index);
-
-    userReserve.liquidityRate = poolReserve.liquidityRate;
-    userReserve.variableBorrowIndex = poolReserve.variableBorrowIndex;
-    userReserve.lastUpdateTimestamp = event.block.timestamp.toI32();
-
-    userReserve.save();
-
-    // TODO: review
-    poolReserve.totalSupplies = poolReserve.totalSupplies.plus(userBalanceChange);
-    // poolReserve.availableLiquidity = poolReserve.totalDeposits
-    //   .minus(poolReserve.totalPrincipalStableDebt)
-    //   .minus(poolReserve.totalScaledVariableDebt);
-
-    poolReserve.availableLiquidity = poolReserve.availableLiquidity.plus(userBalanceChange);
-    poolReserve.totalLiquidity = poolReserve.totalLiquidity.plus(userBalanceChange);
-    poolReserve.lifetimeLiquidity = poolReserve.lifetimeLiquidity.plus(userBalanceChange);
-
-    if (userReserve.usageAsCollateralEnabledOnUser) {
-      poolReserve.totalLiquidityAsCollateral = poolReserve.totalLiquidityAsCollateral.plus(
-        userBalanceChange
-      );
-    }
-    saveReserve(poolReserve, event);
-    saveUserReserveAHistory(userReserve, event, index);
-  } else {
-    poolReserve.lifetimeReserveFactorAccrued = poolReserve.lifetimeReserveFactorAccrued.plus(
+  if (userReserve.usageAsCollateralEnabledOnUser) {
+    poolReserve.totalLiquidityAsCollateral = poolReserve.totalLiquidityAsCollateral.plus(
       userBalanceChange
     );
-    saveReserve(poolReserve, event);
-    // log.error('Minting to treasuey {} an amount of: {}', [from.toHexString(), value.toString()]);
   }
+  saveReserve(poolReserve, event);
+
+  userReserve.lastUpdateTimestamp = event.block.timestamp.toI32();
+  userReserve.save();
+  saveUserReserveAHistory(userReserve, event, index);
 }
 
 export function handleATokenBurn(event: ATokenBurn): void {
