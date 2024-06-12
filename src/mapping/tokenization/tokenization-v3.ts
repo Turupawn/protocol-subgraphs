@@ -190,39 +190,73 @@ function tokenMint(
   index: BigInt
 ): void {
   let aToken = getOrInitSubToken(event.address);
-  let userReserve = getOrInitUserReserve(onBehalf, aToken.underlyingAssetAddress, event);
   let poolReserve = getOrInitReserve(aToken.underlyingAssetAddress, event);
-
   const userBalanceChange = value.minus(balanceIncrease);
-  let calculatedAmount = rayDiv(userBalanceChange, index);
 
-  userReserve.scaledATokenBalance = userReserve.scaledATokenBalance.plus(calculatedAmount);
-  userReserve.currentATokenBalance = rayMul(userReserve.scaledATokenBalance, index);
-  userReserve.variableBorrowIndex = poolReserve.variableBorrowIndex;
-  userReserve.liquidityRate = poolReserve.liquidityRate;
-
-  // TODO: review liquidity?
-  poolReserve.totalSupplies = poolReserve.totalSupplies.plus(userBalanceChange);
-  // poolReserve.availableLiquidity = poolReserve.totalDeposits
-  //   .minus(poolReserve.totalPrincipalStableDebt)
-  //   .minus(poolReserve.totalScaledVariableDebt);
-
-  poolReserve.availableLiquidity = poolReserve.availableLiquidity.plus(userBalanceChange);
   poolReserve.totalATokenSupply = poolReserve.totalATokenSupply.plus(userBalanceChange);
+  let poolId = getPoolByContract(event);
+  let pool = PoolSchema.load(poolId);
+  if (pool && pool.pool) {
+    let poolContract = Pool.bind(Address.fromString((pool.pool as Bytes).toHexString()));
+    const reserveData = poolContract.try_getReserveData(
+      Address.fromString(aToken.underlyingAssetAddress.toHexString())
+    );
+    if (!reserveData.reverted) {
+      poolReserve.accruedToTreasury = reserveData.value.accruedToTreasury;
+    } else {
+      log.error('error reading reserveData. Pool: {}, Underlying: {}', [
+        (pool.pool as Bytes).toHexString(),
+        aToken.underlyingAssetAddress.toHexString(),
+      ]);
+    }
+  }
 
-  poolReserve.totalLiquidity = poolReserve.totalLiquidity.plus(userBalanceChange);
-  poolReserve.lifetimeWithdrawals = poolReserve.lifetimeWithdrawals.minus(userBalanceChange);
+  // Check if we are minting to treasury for mainnet and polygon
+  if (
+    onBehalf.toHexString() != '0xB2289E329D2F85F1eD31Adbb30eA345278F21bcf'.toLowerCase() &&
+    onBehalf.toHexString() != '0xe8599F3cc5D38a9aD6F3684cd5CEa72f10Dbc383'.toLowerCase() &&
+    onBehalf.toHexString() != '0xBe85413851D195fC6341619cD68BfDc26a25b928'.toLowerCase() &&
+    onBehalf.toHexString() != '0x5ba7fd868c40c16f7aDfAe6CF87121E13FC2F7a0'.toLowerCase() &&
+    onBehalf.toHexString() != '0x8A020d92D6B119978582BE4d3EdFdC9F7b28BF31'.toLowerCase() &&
+    onBehalf.toHexString() != '0x053D55f9B5AF8694c503EB288a1B7E552f590710'.toLowerCase() &&
+    onBehalf.toHexString() != '0x464C71f6c2F760DdA6093dCB91C24c39e5d6e18c'.toLowerCase() 
+  ) {
+    let userReserve = getOrInitUserReserve(onBehalf, aToken.underlyingAssetAddress, event);
+    let calculatedAmount = rayDiv(userBalanceChange, index);
 
-  if (userReserve.usageAsCollateralEnabledOnUser) {
-    poolReserve.totalLiquidityAsCollateral = poolReserve.totalLiquidityAsCollateral.plus(
+    userReserve.scaledATokenBalance = userReserve.scaledATokenBalance.plus(calculatedAmount);
+    userReserve.currentATokenBalance = rayMul(userReserve.scaledATokenBalance, index);
+
+    userReserve.liquidityRate = poolReserve.liquidityRate;
+    userReserve.variableBorrowIndex = poolReserve.variableBorrowIndex;
+    userReserve.lastUpdateTimestamp = event.block.timestamp.toI32();
+
+    userReserve.save();
+
+    // TODO: review
+    poolReserve.totalSupplies = poolReserve.totalSupplies.plus(userBalanceChange);
+    // poolReserve.availableLiquidity = poolReserve.totalDeposits
+    //   .minus(poolReserve.totalPrincipalStableDebt)
+    //   .minus(poolReserve.totalScaledVariableDebt);
+
+    poolReserve.availableLiquidity = poolReserve.availableLiquidity.plus(userBalanceChange);
+    poolReserve.totalLiquidity = poolReserve.totalLiquidity.plus(userBalanceChange);
+    poolReserve.lifetimeLiquidity = poolReserve.lifetimeLiquidity.plus(userBalanceChange);
+
+    if (userReserve.usageAsCollateralEnabledOnUser) {
+      poolReserve.totalLiquidityAsCollateral = poolReserve.totalLiquidityAsCollateral.plus(
+        userBalanceChange
+      );
+    }
+    saveReserve(poolReserve, event);
+    saveUserReserveAHistory(userReserve, event, index);
+  } else {
+    poolReserve.lifetimeReserveFactorAccrued = poolReserve.lifetimeReserveFactorAccrued.plus(
       userBalanceChange
     );
+    saveReserve(poolReserve, event);
+    // log.error('Minting to treasuey {} an amount of: {}', [from.toHexString(), value.toString()]);
   }
-  saveReserve(poolReserve, event);
-
-  userReserve.lastUpdateTimestamp = event.block.timestamp.toI32();
-  userReserve.save();
-  saveUserReserveAHistory(userReserve, event, index);
 }
 
 export function handleATokenBurn(event: ATokenBurn): void {
@@ -253,11 +287,40 @@ export function handleBalanceTransfer(event: BalanceTransfer): void {
     balanceTransferValue = balanceTransferValue.times(event.params.index);
   }
 
-  tokenBurn(event, event.params.from, balanceTransferValue, BigInt.fromI32(0), event.params.index);
-  tokenMint(event, event.params.to, balanceTransferValue, BigInt.fromI32(0), event.params.index);
+  let aToken = getOrInitSubToken(event.address);
+
+  // Redo begin
+  //tokenBurn(event, event.params.from, balanceTransferValue, BigInt.fromI32(0), event.params.index);
+  //tokenMint(event, event.params.to, balanceTransferValue, BigInt.fromI32(0), event.params.index);
+  // Sum to
+  let poolReserve = getOrInitReserve(aToken.underlyingAssetAddress, event);
+
+  let userReserveTo = getOrInitUserReserve(event.params.to, aToken.underlyingAssetAddress, event);
+
+  userReserveTo.scaledATokenBalance = userReserveTo.scaledATokenBalance.plus(event.params.value);
+  userReserveTo.currentATokenBalance = rayMul(userReserveTo.scaledATokenBalance, event.params.index);
+
+  userReserveTo.liquidityRate = poolReserve.liquidityRate;
+  userReserveTo.variableBorrowIndex = poolReserve.variableBorrowIndex;
+  userReserveTo.lastUpdateTimestamp = event.block.timestamp.toI32();
+
+  userReserveTo.save();
+
+
+
+  let userReserveFrom = getOrInitUserReserve(event.params.from, aToken.underlyingAssetAddress, event);
+
+  userReserveFrom.scaledATokenBalance = userReserveFrom.scaledATokenBalance.minus(event.params.value);
+  userReserveTo.currentATokenBalance = rayMul(userReserveFrom.scaledATokenBalance, event.params.index);
+
+  userReserveFrom.liquidityRate = poolReserve.liquidityRate;
+  userReserveFrom.variableBorrowIndex = poolReserve.variableBorrowIndex;
+  userReserveFrom.lastUpdateTimestamp = event.block.timestamp.toI32();
+
+  userReserveFrom.save();
+  // Redo end
 
   // TODO: is this really necessary(from v1)? if we transfer aToken we are not moving the collateral (underlying token)
-  let aToken = getOrInitSubToken(event.address);
   let userFromReserve = getOrInitUserReserve(
     event.params.from,
     aToken.underlyingAssetAddress,
